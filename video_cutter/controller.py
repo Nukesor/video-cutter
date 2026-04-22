@@ -169,6 +169,7 @@ class SectionsModel(QAbstractListModel):
 
 class VideoEditorController(QObject):
     sourceChanged = Signal()
+    dialogDirectoriesChanged = Signal()
     durationChanged = Signal()
     positionChanged = Signal()
     playingChanged = Signal()
@@ -187,6 +188,7 @@ class VideoEditorController(QObject):
         self._player = mpv.MPV(
             config=False,
             hwdec="no",
+            keep_open="yes",
             loglevel="info",
             osc=False,
             input_default_bindings=False,
@@ -196,6 +198,9 @@ class VideoEditorController(QObject):
         )
         self._source_path: Path | None = None
         self._media_info: MediaInfo | None = None
+        self._state_path = Path.home() / ".local" / "state" / "video_cutter.json"
+        self._last_open_directory: Path | None = None
+        self._last_output_directory: Path | None = None
         self._position = 0.0
         self._playing = False
         self._pending_start: float | None = None
@@ -203,10 +208,15 @@ class VideoEditorController(QObject):
         self._muted = False
         self._selected_section_index = -1
         self._next_section_id = 1
+        self._eof_reached = False
         self._status_text = "Open a video to start cutting sections."
         self._rendering = False
         self._render_output = ""
         self._render_destination: Path | None = None
+        self._render_directory: Path | None = None
+        self._render_queue: list[tuple[Section, Path]] = []
+        self._render_current_job: tuple[Section, Path] | None = None
+        self._render_completed_count = 0
 
         self._render_process = QProcess(self)
         self._render_process.setProgram("ffmpeg")
@@ -219,6 +229,8 @@ class VideoEditorController(QObject):
 
         self._player.observe_property("time-pos", self._handle_time_position)
         self._player.observe_property("pause", self._handle_pause_state)
+        self._player.observe_property("eof-reached", self._handle_eof_reached)
+        self._load_state()
         self._log.info("controller initialized")
 
     @Property(QObject, constant=True)
@@ -233,12 +245,19 @@ class VideoEditorController(QObject):
     def sourceName(self) -> str:
         return self._source_path.name if self._source_path else ""
 
-    @Property(str, notify=sourceChanged)
-    def defaultOutputFileUrl(self) -> str:
-        if self._source_path is None:
-            return ""
-        output_path = self._source_path.with_stem(f"{self._source_path.stem}_rendered")
-        return QUrl.fromLocalFile(str(output_path)).toString()
+    @Property(str, notify=dialogDirectoriesChanged)
+    def defaultOpenDirectoryUrl(self) -> str:
+        directory = self._last_open_directory or Path.home()
+        return QUrl.fromLocalFile(str(directory)).toString()
+
+    @Property(str, notify=dialogDirectoriesChanged)
+    def defaultOutputDirectoryUrl(self) -> str:
+        directory = self._last_output_directory
+        if directory is None and self._source_path is not None:
+            directory = self._source_path.parent
+        if directory is None:
+            directory = Path.home()
+        return QUrl.fromLocalFile(str(directory)).toString()
 
     @Property(bool, notify=sourceChanged)
     def hasSource(self) -> bool:
@@ -266,11 +285,15 @@ class VideoEditorController(QObject):
 
     @Property(float, notify=markersChanged)
     def pendingStart(self) -> float:
-        return -1.0 if self._pending_start is None else self._pending_start
+        section = self._selected_section()
+        marker = section.start if section else self._pending_start
+        return -1.0 if marker is None else marker
 
     @Property(float, notify=markersChanged)
     def pendingEnd(self) -> float:
-        return -1.0 if self._pending_end is None else self._pending_end
+        section = self._selected_section()
+        marker = section.end if section else self._pending_end
+        return -1.0 if marker is None else marker
 
     @Property(bool, notify=mutedChanged)
     def muted(self) -> bool:
@@ -336,6 +359,92 @@ class VideoEditorController(QObject):
         self._rendering = rendering
         self.renderingChanged.emit()
 
+    def _load_state(self) -> None:
+        if not self._state_path.exists():
+            return
+
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._log.exception("failed to load state from %s", self._state_path)
+            return
+
+        self._last_open_directory = self._coerce_directory_path(
+            payload.get("last_open_directory"),
+        )
+        self._last_output_directory = self._coerce_directory_path(
+            payload.get("last_output_directory"),
+        )
+
+    def _save_state(self) -> None:
+        payload = {
+            "last_open_directory": (
+                str(self._last_open_directory) if self._last_open_directory else None
+            ),
+            "last_output_directory": (
+                str(self._last_output_directory)
+                if self._last_output_directory
+                else None
+            ),
+        }
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            self._log.exception("failed to save state to %s", self._state_path)
+
+    def _coerce_directory_path(self, value: Any) -> Path | None:
+        if not isinstance(value, str) or not value:
+            return None
+        path = Path(value).expanduser()
+        if path.exists() and path.is_dir():
+            return path
+        return None
+
+    def _remember_open_directory(self, path: Path) -> None:
+        directory = path if path.is_dir() else path.parent
+        if directory == self._last_open_directory:
+            return
+        self._last_open_directory = directory
+        self._save_state()
+        self.dialogDirectoriesChanged.emit()
+
+    def _remember_output_directory(self, path: Path) -> None:
+        directory = path if path.is_dir() else path.parent
+        if directory == self._last_output_directory:
+            return
+        self._last_output_directory = directory
+        self._save_state()
+        self.dialogDirectoriesChanged.emit()
+
+    def _load_player_source(self, start: float = 0.0, pause: bool = True) -> bool:
+        if self._source_path is None:
+            return False
+
+        options = {"pause": "yes" if pause else "no"}
+        if start > 0.0:
+            options["start"] = f"{start:.3f}"
+
+        try:
+            self._player.loadfile(str(self._source_path), "replace", **options)
+        except SystemError as error:
+            self._log.exception(
+                "failed to load source path=%s start=%.3f pause=%s",
+                self._source_path,
+                start,
+                pause,
+            )
+            self._set_status_text(f"Playback failed: {error}")
+            return False
+
+        self._eof_reached = False
+        self._position = start
+        self.positionChanged.emit()
+        return True
+
     def _selected_section(self) -> Section | None:
         return self._sections_model.section_at(self._selected_section_index)
 
@@ -353,6 +462,7 @@ class VideoEditorController(QObject):
         self._pending_end = None
         self._selected_section_index = -1
         self._next_section_id = 1
+        self._eof_reached = False
         self._position = 0.0
         self.markersChanged.emit()
         self.positionChanged.emit()
@@ -390,6 +500,23 @@ class VideoEditorController(QObject):
             "_apply_playing_update",
             Qt.ConnectionType.QueuedConnection,
             Q_ARG(bool, playing),
+        )
+
+    @Slot(bool)
+    def _apply_eof_update(self, reached: bool) -> None:
+        if reached == self._eof_reached:
+            return
+        self._eof_reached = reached
+        if reached:
+            self._apply_playing_update(False)
+
+    def _handle_eof_reached(self, _name: str, value: Any) -> None:
+        reached = bool(value)
+        QMetaObject.invokeMethod(
+            self,
+            "_apply_eof_update",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(bool, reached),
         )
 
     def _probe_media(self, path: Path) -> MediaInfo:
@@ -469,18 +596,15 @@ class VideoEditorController(QObject):
         exit_status: QProcess.ExitStatus,
     ) -> None:
         self._consume_render_output()
-        self._set_rendering(False)
         self._log.info(
             "render finished exit_code=%s exit_status=%s",
             exit_code,
-            int(exit_status),
+            exit_status,
         )
 
         if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
-            destination = (
-                str(self._render_destination) if self._render_destination else "output"
-            )
-            self._set_status_text(f"Rendered {destination}")
+            self._render_completed_count += 1
+            self._start_next_render()
             return
 
         details = (
@@ -488,10 +612,15 @@ class VideoEditorController(QObject):
             if self._render_output
             else "ffmpeg failed"
         )
+        self._set_rendering(False)
+        self._render_queue.clear()
+        self._render_current_job = None
         self._set_status_text(f"Render failed: {details}")
 
     def _handle_render_error(self, process_error: QProcess.ProcessError) -> None:
         self._set_rendering(False)
+        self._render_queue.clear()
+        self._render_current_job = None
         self._log.exception("render process error: %s", int(process_error))
         if process_error == QProcess.ProcessError.FailedToStart:
             self._set_status_text("ffmpeg was not found. Install ffmpeg and try again.")
@@ -499,6 +628,7 @@ class VideoEditorController(QObject):
         self._set_status_text("ffmpeg process error interrupted rendering.")
 
     def _emit_selection_change(self) -> None:
+        self.markersChanged.emit()
         self.selectedSectionChanged.emit()
         self.selectedCropChanged.emit()
 
@@ -547,55 +677,25 @@ class VideoEditorController(QObject):
         y = min(y, height - crop_height)
         return int(x), int(y), int(crop_width), int(crop_height)
 
-    def _build_ffmpeg_arguments(self, output_path: Path) -> list[str]:
+    def _build_ffmpeg_arguments(self, section: Section, output_path: Path) -> list[str]:
         assert self._source_path is not None
         assert self._media_info is not None
 
-        sections = self._sections_model.sections()
-        pixel_crops = [self._pixel_crop(section.crop) for section in sections]
-        target_width = max(crop[2] for crop in pixel_crops)
-        target_height = max(crop[3] for crop in pixel_crops)
+        crop_x, crop_y, crop_width, crop_height = self._pixel_crop(section.crop)
+        filter_parts = [
+            ""
+            f"[0:v]trim=start={section.start:.3f}:end={section.end:.3f},"
+            f"setpts=PTS-STARTPTS,"
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}"
+            "[vout]"
+        ]
 
-        filter_parts: list[str] = []
-        video_labels: list[str] = []
-        audio_labels: list[str] = []
-
-        for index, (section, crop) in enumerate(
-            zip(sections, pixel_crops, strict=True),
-        ):
-            crop_x, crop_y, crop_width, crop_height = crop
-            padded_label = f"vp{index}"
+        if self._media_info.has_audio and not self._muted:
             filter_parts.append(
                 ""
-                f"[0:v]trim=start={section.start:.3f}:end={section.end:.3f},"
-                f"setpts=PTS-STARTPTS,"
-                f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y},"
-                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black"
-                f"[{padded_label}]"
+                f"[0:a]atrim=start={section.start:.3f}:end={section.end:.3f},"
+                "asetpts=PTS-STARTPTS[aout]"
             )
-            video_labels.append(f"[{padded_label}]")
-
-            if self._media_info.has_audio and not self._muted:
-                audio_label = f"a{index}"
-                filter_parts.append(
-                    ""
-                    f"[0:a]atrim=start={section.start:.3f}:end={section.end:.3f},"
-                    f"asetpts=PTS-STARTPTS[{audio_label}]"
-                )
-                audio_labels.append(f"[{audio_label}]")
-
-        if len(video_labels) == 1:
-            filter_parts.append(f"{video_labels[0]}null[vout]")
-            if len(audio_labels) == 1:
-                filter_parts.append(f"{audio_labels[0]}anull[aout]")
-        else:
-            filter_parts.append(
-                f"{''.join(video_labels)}concat=n={len(video_labels)}:v=1:a=0[vout]",
-            )
-            if audio_labels:
-                filter_parts.append(
-                    f"{''.join(audio_labels)}concat=n={len(audio_labels)}:v=0:a=1[aout]"
-                )
 
         arguments = [
             "-hide_banner",
@@ -606,21 +706,13 @@ class VideoEditorController(QObject):
             ";".join(filter_parts),
             "-map",
             "[vout]",
-            "-c:v",
-            self._media_info.video_codec,
         ]
 
-        if (
-            self._media_info.has_audio
-            and not self._muted
-            and self._media_info.audio_codec
-        ):
+        if self._media_info.has_audio and not self._muted:
             arguments.extend(
                 [
                     "-map",
                     "[aout]",
-                    "-c:a",
-                    self._media_info.audio_codec,
                 ],
             )
         else:
@@ -628,6 +720,41 @@ class VideoEditorController(QObject):
 
         arguments.append(str(output_path))
         return arguments
+
+    def _section_output_path(self, output_directory: Path, section: Section) -> Path:
+        assert self._source_path is not None
+        suffix = self._source_path.suffix or self._media_info.container_extension
+        return (
+            output_directory
+            / f"{self._source_path.stem}_section{section.identifier}{suffix}"
+        )
+
+    def _start_next_render(self) -> None:
+        if not self._render_queue:
+            self._render_current_job = None
+            self._set_rendering(False)
+            if self._render_directory is not None:
+                count = self._render_completed_count
+                noun = "section" if count == 1 else "sections"
+                self._set_status_text(
+                    f"Rendered {count} {noun} to {self._render_directory}"
+                )
+            return
+
+        self._render_output = ""
+        self._render_current_job = self._render_queue.pop(0)
+        section, output_path = self._render_current_job
+        self._render_destination = output_path
+        render_index = self._render_completed_count + 1
+        total = self._render_completed_count + 1 + len(self._render_queue)
+        self._set_status_text(
+            f"Rendering section {section.identifier} ({render_index}/{total})...",
+        )
+
+        arguments = self._build_ffmpeg_arguments(section, output_path)
+        self._log.info("starting ffmpeg with args: %s", arguments)
+        self._render_process.setArguments(arguments)
+        self._render_process.start()
 
     @Slot(str)
     def openFile(self, file_url: str) -> None:
@@ -650,27 +777,47 @@ class VideoEditorController(QObject):
 
         self._source_path = path
         self._media_info = media_info
+        self._remember_open_directory(path)
         self._reset_editor_state()
         self.sourceChanged.emit()
         self.durationChanged.emit()
         self.mediaInfoChanged.emit()
 
-        self._player.play(str(path))
-        self._player.pause = True
-        self._set_status_text(f"Loaded {path.name}")
+        if self._load_player_source(pause=True):
+            self._set_status_text(f"Loaded {path.name}")
 
     @Slot()
     def togglePlayback(self) -> None:
         if not self.hasSource:
             return
-        self._player.pause = self._playing
+
+        if not self._playing and (
+            self._eof_reached
+            or math.isclose(self._position, self.duration, abs_tol=0.05)
+        ):
+            self._load_player_source(pause=False)
+            return
+
+        try:
+            self._player.pause = self._playing
+        except SystemError:
+            self._log.exception("playback toggle failed, reloading current source")
+            self._load_player_source(start=self._position, pause=self._playing)
 
     @Slot(float)
     def seekTo(self, seconds: float) -> None:
         if not self.hasSource:
             return
         target = _clamp(seconds, 0.0, self.duration)
-        self._player.seek(target, reference="absolute", precision="exact")
+        self._eof_reached = False
+
+        try:
+            self._player.seek(target, reference="absolute", precision="exact")
+        except SystemError:
+            self._log.exception("seek failed at %.3f, reloading current source", target)
+            if not self._load_player_source(start=target, pause=not self._playing):
+                return
+
         self._position = target
         self.positionChanged.emit()
 
@@ -714,7 +861,9 @@ class VideoEditorController(QObject):
         )
         self._next_section_id += 1
         self._sections_model.add_section(section)
-        self._selected_section_index = self._sections_model.rowCount() - 1
+        self._pending_start = None
+        self._pending_end = None
+        self._selected_section_index = -1
         self._emit_selection_change()
         self.renderingChanged.emit()
         self._log.info(
@@ -724,7 +873,9 @@ class VideoEditorController(QObject):
             end,
         )
         self._set_status_text(
-            f"Added section {_format_seconds(start)} - {_format_seconds(end)}",
+            "Added section "
+            f"{_format_seconds(start)} - {_format_seconds(end)}. "
+            "Select it in the list to adjust its crop.",
         )
 
     @Slot(int)
@@ -749,6 +900,16 @@ class VideoEditorController(QObject):
             self._selected_section_index = max(0, self._selected_section_index - 1)
         self._emit_selection_change()
         self.renderingChanged.emit()
+
+    @Slot()
+    def clearSelectedSection(self) -> None:
+        if self._selected_section_index < 0:
+            return
+        self._log.info(
+            "cleared selected section index=%s", self._selected_section_index
+        )
+        self._selected_section_index = -1
+        self._emit_selection_change()
 
     @Slot()
     def resetSelectedCrop(self) -> None:
@@ -810,28 +971,34 @@ class VideoEditorController(QObject):
         if not self.canRender or self._source_path is None or self._media_info is None:
             return
 
-        output_path = _coerce_local_path(output_file_url)
-        if output_path is None:
+        output_directory = _coerce_local_path(output_file_url)
+        if output_directory is None:
             return
 
-        if output_path == self._source_path:
+        if output_directory.exists() and not output_directory.is_dir():
             self._set_status_text(
-                "Choose a different output file than the source video.",
+                "Choose a directory for the rendered sections.",
             )
             return
 
-        if output_path.suffix.lower() != self._media_info.container_extension.lower():
-            output_path = output_path.with_suffix(self._media_info.container_extension)
+        try:
+            output_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self._set_status_text(f"Unable to create output directory: {error}")
+            return
 
-        self._render_output = ""
-        self._render_destination = output_path
+        sections = self._sections_model.sections()
+        self._render_queue = [
+            (section, self._section_output_path(output_directory, section))
+            for section in sections
+        ]
+        self._remember_output_directory(output_directory)
+        self._render_directory = output_directory
+        self._render_current_job = None
+        self._render_completed_count = 0
+
         self._set_rendering(True)
-        self._set_status_text(f"Rendering {output_path.name}...")
-
-        arguments = self._build_ffmpeg_arguments(output_path)
-        self._log.info("starting ffmpeg with args: %s", arguments)
-        self._render_process.setArguments(arguments)
-        self._render_process.start()
+        self._start_next_render()
 
     @Slot()
     def shutdown(self) -> None:

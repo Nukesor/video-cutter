@@ -37,17 +37,17 @@ ApplicationWindow {
 
         title: "Open Video"
         fileMode: FileDialog.OpenFile
+        currentFolder: backend.defaultOpenDirectoryUrl
         nameFilters: ["Video files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)", "All files (*)"]
         onAccepted: backend.openFile(selectedFile)
     }
 
-    FileDialog {
+    FolderDialog {
         id: saveDialog
 
-        title: "Render Video"
-        fileMode: FileDialog.SaveFile
-        currentFile: backend.defaultOutputFileUrl
-        onAccepted: backend.renderTo(selectedFile)
+        title: "Choose Output Directory"
+        currentFolder: backend.defaultOutputDirectoryUrl
+        onAccepted: backend.renderTo(selectedFolder)
     }
 
     header: ToolBar {
@@ -66,9 +66,18 @@ ApplicationWindow {
             }
 
             CheckBox {
+                id: soundToggle
+
                 text: "Disable Sound"
                 checked: backend.muted
                 onToggled: backend.setMuted(checked)
+
+                contentItem: Text {
+                    text: soundToggle.text
+                    color: "#d9dde7"
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: soundToggle.indicator.width + soundToggle.spacing
+                }
             }
 
             Button {
@@ -158,25 +167,18 @@ ApplicationWindow {
                         visible: backend.hasSelectedSection && backend.hasSource
 
                         property var crop: backend.selectedCrop
-                        property real dragStartX: 0
-                        property real dragStartY: 0
-                        property real dragX: 0
-                        property real dragY: 0
-                        property bool dragging: false
+                        property string dragMode: ""
+                        property point dragStart: Qt.point(0, 0)
+                        property rect originalRect: Qt.rect(0, 0, 0, 0)
+                        property rect draftRect: selectedRect
+                        property real minSelectionSize: 8
                         property rect selectedRect: Qt.rect(
                             videoFrame.videoRect.x + crop.x * videoFrame.videoRect.width,
                             videoFrame.videoRect.y + crop.y * videoFrame.videoRect.height,
                             crop.width * videoFrame.videoRect.width,
                             crop.height * videoFrame.videoRect.height
                         )
-                        property rect activeRect: dragging
-                            ? Qt.rect(
-                                Math.min(dragStartX, dragX),
-                                Math.min(dragStartY, dragY),
-                                Math.abs(dragX - dragStartX),
-                                Math.abs(dragY - dragStartY)
-                            )
-                            : selectedRect
+                        property rect activeRect: dragMode.length > 0 ? draftRect : selectedRect
 
                         function clampX(value) {
                             return Math.max(videoFrame.videoRect.x, Math.min(videoFrame.videoRect.x + videoFrame.videoRect.width, value))
@@ -189,6 +191,90 @@ ApplicationWindow {
                         function insideVideo(x, y) {
                             return x >= videoFrame.videoRect.x && x <= videoFrame.videoRect.x + videoFrame.videoRect.width
                                 && y >= videoFrame.videoRect.y && y <= videoFrame.videoRect.y + videoFrame.videoRect.height
+                        }
+
+                        function insideActiveRect(x, y) {
+                            return x >= activeRect.x && x <= activeRect.x + activeRect.width
+                                && y >= activeRect.y && y <= activeRect.y + activeRect.height
+                        }
+
+                        function applyCrop(rect) {
+                            backend.setSelectedCropNormalized(
+                                (rect.x - videoFrame.videoRect.x) / videoFrame.videoRect.width,
+                                (rect.y - videoFrame.videoRect.y) / videoFrame.videoRect.height,
+                                rect.width / videoFrame.videoRect.width,
+                                rect.height / videoFrame.videoRect.height
+                            )
+                        }
+
+                        function beginEdit(mode, x, y) {
+                            dragMode = mode
+                            dragStart = Qt.point(clampX(x), clampY(y))
+                            originalRect = selectedRect
+                            draftRect = selectedRect
+                            if (mode === "draw") {
+                                draftRect = Qt.rect(dragStart.x, dragStart.y, 0, 0)
+                            }
+                        }
+
+                        function updateDraft(x, y) {
+                            const currentX = clampX(x)
+                            const currentY = clampY(y)
+                            const minX = videoFrame.videoRect.x
+                            const minY = videoFrame.videoRect.y
+                            const maxX = videoFrame.videoRect.x + videoFrame.videoRect.width
+                            const maxY = videoFrame.videoRect.y + videoFrame.videoRect.height
+
+                            if (dragMode === "draw") {
+                                draftRect = Qt.rect(
+                                    Math.min(dragStart.x, currentX),
+                                    Math.min(dragStart.y, currentY),
+                                    Math.abs(currentX - dragStart.x),
+                                    Math.abs(currentY - dragStart.y)
+                                )
+                                return
+                            }
+
+                            if (dragMode === "move") {
+                                const movedX = Math.max(minX, Math.min(maxX - originalRect.width, originalRect.x + currentX - dragStart.x))
+                                const movedY = Math.max(minY, Math.min(maxY - originalRect.height, originalRect.y + currentY - dragStart.y))
+                                draftRect = Qt.rect(movedX, movedY, originalRect.width, originalRect.height)
+                                return
+                            }
+
+                            let left = originalRect.x
+                            let right = originalRect.x + originalRect.width
+                            let top = originalRect.y
+                            let bottom = originalRect.y + originalRect.height
+
+                            if (dragMode === "topLeft" || dragMode === "bottomLeft") {
+                                left = Math.max(minX, Math.min(right - minSelectionSize, currentX))
+                            }
+                            if (dragMode === "topRight" || dragMode === "bottomRight") {
+                                right = Math.min(maxX, Math.max(left + minSelectionSize, currentX))
+                            }
+                            if (dragMode === "topLeft" || dragMode === "topRight") {
+                                top = Math.max(minY, Math.min(bottom - minSelectionSize, currentY))
+                            }
+                            if (dragMode === "bottomLeft" || dragMode === "bottomRight") {
+                                bottom = Math.min(maxY, Math.max(top + minSelectionSize, currentY))
+                            }
+
+                            draftRect = Qt.rect(left, top, right - left, bottom - top)
+                        }
+
+                        function commitEdit() {
+                            if (dragMode.length === 0) {
+                                return
+                            }
+
+                            const mode = dragMode
+                            dragMode = ""
+                            if ((mode === "draw" || mode.indexOf("top") === 0 || mode.indexOf("bottom") === 0)
+                                    && (draftRect.width < minSelectionSize || draftRect.height < minSelectionSize)) {
+                                return
+                            }
+                            applyCrop(draftRect)
                         }
 
                         Rectangle {
@@ -241,56 +327,166 @@ ApplicationWindow {
                             visible: cropOverlay.activeRect.width > 48 && cropOverlay.activeRect.height > 22
                         }
 
+                        Rectangle {
+                            x: cropOverlay.activeRect.x + 2
+                            y: cropOverlay.activeRect.y + 2
+                            z: 1
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: "#d9f5ff"
+                            border.color: "#0b0d10"
+                            border.width: 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.SizeFDiagCursor
+                                preventStealing: true
+
+                                onPressed: function(mouse) {
+                                    cropOverlay.beginEdit("topLeft", mouse.x + parent.x, mouse.y + parent.y)
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (pressed) {
+                                        cropOverlay.updateDraft(mouse.x + parent.x, mouse.y + parent.y)
+                                    }
+                                }
+
+                                onReleased: cropOverlay.commitEdit()
+                            }
+                        }
+
+                        Rectangle {
+                            x: cropOverlay.activeRect.x + cropOverlay.activeRect.width - width - 2
+                            y: cropOverlay.activeRect.y + 2
+                            z: 1
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: "#d9f5ff"
+                            border.color: "#0b0d10"
+                            border.width: 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.SizeBDiagCursor
+                                preventStealing: true
+
+                                onPressed: function(mouse) {
+                                    cropOverlay.beginEdit("topRight", mouse.x + parent.x, mouse.y + parent.y)
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (pressed) {
+                                        cropOverlay.updateDraft(mouse.x + parent.x, mouse.y + parent.y)
+                                    }
+                                }
+
+                                onReleased: cropOverlay.commitEdit()
+                            }
+                        }
+
+                        Rectangle {
+                            x: cropOverlay.activeRect.x + 2
+                            y: cropOverlay.activeRect.y + cropOverlay.activeRect.height - height - 2
+                            z: 1
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: "#d9f5ff"
+                            border.color: "#0b0d10"
+                            border.width: 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.SizeBDiagCursor
+                                preventStealing: true
+
+                                onPressed: function(mouse) {
+                                    cropOverlay.beginEdit("bottomLeft", mouse.x + parent.x, mouse.y + parent.y)
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (pressed) {
+                                        cropOverlay.updateDraft(mouse.x + parent.x, mouse.y + parent.y)
+                                    }
+                                }
+
+                                onReleased: cropOverlay.commitEdit()
+                            }
+                        }
+
+                        Rectangle {
+                            x: cropOverlay.activeRect.x + cropOverlay.activeRect.width - width - 2
+                            y: cropOverlay.activeRect.y + cropOverlay.activeRect.height - height - 2
+                            z: 1
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: "#d9f5ff"
+                            border.color: "#0b0d10"
+                            border.width: 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.SizeFDiagCursor
+                                preventStealing: true
+
+                                onPressed: function(mouse) {
+                                    cropOverlay.beginEdit("bottomRight", mouse.x + parent.x, mouse.y + parent.y)
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (pressed) {
+                                        cropOverlay.updateDraft(mouse.x + parent.x, mouse.y + parent.y)
+                                    }
+                                }
+
+                                onReleased: cropOverlay.commitEdit()
+                            }
+                        }
+
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
-                            cursorShape: cropOverlay.insideVideo(mouseX, mouseY) ? Qt.CrossCursor : Qt.ArrowCursor
+                            cursorShape: !cropOverlay.insideVideo(mouseX, mouseY)
+                                ? Qt.ArrowCursor
+                                : cropOverlay.insideActiveRect(mouseX, mouseY)
+                                    ? Qt.SizeAllCursor
+                                    : Qt.CrossCursor
 
                             onPressed: function(mouse) {
                                 if (!cropOverlay.insideVideo(mouse.x, mouse.y)) {
                                     return
                                 }
 
-                                cropOverlay.dragging = true
-                                cropOverlay.dragStartX = cropOverlay.clampX(mouse.x)
-                                cropOverlay.dragStartY = cropOverlay.clampY(mouse.y)
-                                cropOverlay.dragX = cropOverlay.dragStartX
-                                cropOverlay.dragY = cropOverlay.dragStartY
+                                if (cropOverlay.insideActiveRect(mouse.x, mouse.y)) {
+                                    cropOverlay.beginEdit("move", mouse.x, mouse.y)
+                                    return
+                                }
+
+                                cropOverlay.beginEdit("draw", mouse.x, mouse.y)
                             }
 
                             onPositionChanged: function(mouse) {
-                                if (!cropOverlay.dragging) {
+                                if (cropOverlay.dragMode.length === 0) {
                                     return
                                 }
 
-                                cropOverlay.dragX = cropOverlay.clampX(mouse.x)
-                                cropOverlay.dragY = cropOverlay.clampY(mouse.y)
+                                cropOverlay.updateDraft(mouse.x, mouse.y)
                             }
 
                             onReleased: function(mouse) {
-                                if (!cropOverlay.dragging) {
+                                if (cropOverlay.dragMode.length === 0) {
                                     return
                                 }
 
-                                cropOverlay.dragX = cropOverlay.clampX(mouse.x)
-                                cropOverlay.dragY = cropOverlay.clampY(mouse.y)
-                                cropOverlay.dragging = false
-
-                                const width = Math.abs(cropOverlay.dragX - cropOverlay.dragStartX)
-                                const height = Math.abs(cropOverlay.dragY - cropOverlay.dragStartY)
-                                if (width < 8 || height < 8) {
-                                    return
-                                }
-
-                                const x = Math.min(cropOverlay.dragStartX, cropOverlay.dragX)
-                                const y = Math.min(cropOverlay.dragStartY, cropOverlay.dragY)
-                                backend.setSelectedCropNormalized(
-                                    (x - videoFrame.videoRect.x) / videoFrame.videoRect.width,
-                                    (y - videoFrame.videoRect.y) / videoFrame.videoRect.height,
-                                    width / videoFrame.videoRect.width,
-                                    height / videoFrame.videoRect.height
-                                )
+                                cropOverlay.updateDraft(mouse.x, mouse.y)
+                                cropOverlay.commitEdit()
                             }
+
+                            onCanceled: cropOverlay.dragMode = ""
                         }
                     }
                 }
@@ -384,25 +580,29 @@ ApplicationWindow {
 
                             Button {
                                 text: "Set Start"
-                                enabled: backend.hasSource
+                                visible: !backend.hasSelectedSection
+                                enabled: backend.hasSource && !backend.hasSelectedSection
                                 onClicked: backend.markStart()
                             }
 
                             Button {
                                 text: "Set End"
-                                enabled: backend.hasSource
+                                visible: !backend.hasSelectedSection
+                                enabled: backend.hasSource && !backend.hasSelectedSection
                                 onClicked: backend.markEnd()
                             }
 
                             Button {
                                 text: "Add Section"
-                                enabled: backend.hasSource
+                                visible: !backend.hasSelectedSection
+                                enabled: backend.hasSource && !backend.hasSelectedSection
                                 onClicked: backend.addSectionFromMarkers()
                             }
 
                             Button {
                                 text: "Clear Markers"
-                                enabled: backend.hasSource
+                                visible: !backend.hasSelectedSection
+                                enabled: backend.hasSource && !backend.hasSelectedSection
                                 onClicked: backend.clearMarkers()
                             }
 
@@ -411,7 +611,9 @@ ApplicationWindow {
                             }
 
                             Label {
-                                text: "Start " + window.formatSection(backend.pendingStart) + "  End " + window.formatSection(backend.pendingEnd)
+                                text: backend.hasSelectedSection
+                                    ? "Selected section " + window.formatSection(backend.pendingStart) + " - " + window.formatSection(backend.pendingEnd)
+                                    : "Start " + window.formatSection(backend.pendingStart) + "  End " + window.formatSection(backend.pendingEnd)
                                 color: "#97a0b0"
                             }
                         }
@@ -440,17 +642,28 @@ ApplicationWindow {
 
                     Label {
                         text: backend.hasSelectedSection
-                            ? "Drag on the preview to change the crop for the selected section."
-                            : "Create a section, then click it here to edit its crop."
+                            ? "Drag the crop or its corner handles, then confirm to lock the current crop."
+                            : "Create a section, then click it here to edit and confirm its crop."
                         color: "#97a0b0"
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
 
-                    Button {
-                        text: "Reset Crop To Full Frame"
-                        enabled: backend.hasSelectedSection
-                        onClicked: backend.resetSelectedCrop()
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Button {
+                            text: "Reset Crop To Full Frame"
+                            enabled: backend.hasSelectedSection
+                            onClicked: backend.resetSelectedCrop()
+                        }
+
+                        Button {
+                            text: "Confirm Crop"
+                            enabled: backend.hasSelectedSection
+                            onClicked: backend.clearSelectedSection()
+                        }
                     }
 
                     ListView {
@@ -468,13 +681,15 @@ ApplicationWindow {
                             color: index === backend.selectedSectionIndex ? "#25354a" : "#22252d"
                             border.color: index === backend.selectedSectionIndex ? "#6ed4ff" : "#313540"
                             border.width: 1
-                            implicitHeight: 96
+                            implicitHeight: Math.max(108, sectionCardLayout.implicitHeight + 24)
 
                             TapHandler {
                                 onTapped: backend.selectSection(index)
                             }
 
                             ColumnLayout {
+                                id: sectionCardLayout
+
                                 anchors.fill: parent
                                 anchors.margins: 12
                                 spacing: 6
@@ -511,7 +726,7 @@ ApplicationWindow {
                                 Label {
                                     text: cropSummary
                                     color: "#97a0b0"
-                                    elide: Text.ElideRight
+                                    wrapMode: Text.WordWrap
                                     Layout.fillWidth: true
                                 }
                             }
