@@ -1,6 +1,4 @@
-def main():
-    print("Hello from video-cutter!")
-
+from video_cutter.app import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
