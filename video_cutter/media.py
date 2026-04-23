@@ -1,3 +1,5 @@
+"""ffprobe integration for loading the media metadata used by the editor."""
+
 from __future__ import annotations
 
 import json
@@ -8,6 +10,7 @@ from .models import MediaInfo
 
 
 def probe_media(path: Path) -> MediaInfo:
+    """Probe a source file and return the media information the app needs."""
     result = subprocess.run(
         [
             "ffprobe",

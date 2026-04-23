@@ -53,10 +53,15 @@
   - playback state
   - pending markers for new-section creation
   - selected section index
-  - render process lifecycle / status text
-  - `SectionsModel`
+  - status text
 - Selected section markers are surfaced through the existing marker properties so the timeline can highlight the active section bounds.
 - The controller also tracks optional bounded preview playback so a section can be reviewed in-place without affecting export state.
+
+### Sections Model
+
+- `video_cutter/sections_model.py`
+- Owns the `QAbstractListModel` implementation used by the sidebar and timeline overlays.
+- Keeps Qt model responsibilities out of `VideoEditorController`.
 
 ### Shared Models
 
@@ -116,7 +121,7 @@
 ### Export Pipeline
 
 - Render planning helpers live in `video_cutter/rendering.py`.
-- Runtime render orchestration still lives in `video_cutter/controller.py` through `QProcess`.
+- Runtime render orchestration lives in `video_cutter/render_runner.py` through `QProcess`.
 - Media metadata is probed with `ffprobe` via `video_cutter/media.py`.
 - Rendering is executed through `QProcess` running `ffmpeg`.
 - Rendering runs one ffmpeg job per section and names outputs as `{original_name}_section{sectionid}.{original_extension}`.
@@ -152,6 +157,8 @@
 - `main.py`
 - `video_cutter/app.py`
 - `video_cutter/controller.py`
+- `video_cutter/sections_model.py`
+- `video_cutter/render_runner.py`
 - `video_cutter/mpv_item.py`
 - `video_cutter/qml/Main.qml`
 - `README.md`

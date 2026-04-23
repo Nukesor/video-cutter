@@ -1,3 +1,5 @@
+"""Persistence for file dialog directories between app launches."""
+
 from __future__ import annotations
 
 import json
@@ -10,16 +12,22 @@ from .debug import get_logger
 
 @dataclass(slots=True)
 class DialogDirectoryState:
+    """Last-used directories for opening sources and exporting renders."""
+
     last_open_directory: Path | None = None
     last_output_directory: Path | None = None
 
 
 class DialogDirectoryStore:
+    """Load and save dialog directory state in the local state directory."""
+
     def __init__(self, path: Path) -> None:
+        """Remember where the JSON state file is stored."""
         self._log = get_logger("video_cutter.persistence")
         self._path = path
 
     def load(self) -> DialogDirectoryState:
+        """Read persisted dialog directories, ignoring invalid or missing state."""
         if not self._path.exists():
             return DialogDirectoryState()
 
@@ -39,6 +47,7 @@ class DialogDirectoryStore:
         )
 
     def save(self, state: DialogDirectoryState) -> None:
+        """Persist the current dialog directories for the next launch."""
         payload = {
             "last_open_directory": (
                 str(state.last_open_directory) if state.last_open_directory else None
@@ -59,6 +68,7 @@ class DialogDirectoryStore:
             self._log.exception("failed to save state to %s", self._path)
 
     def _coerce_directory_path(self, value: Any) -> Path | None:
+        """Accept only existing directories from persisted JSON values."""
         if not isinstance(value, str) or not value:
             return None
         path = Path(value).expanduser()

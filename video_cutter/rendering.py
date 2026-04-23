@@ -1,3 +1,5 @@
+"""Pure helpers for planning ffmpeg work from editor state."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +10,8 @@ from .models import CropRect, MediaInfo, Section, clamp
 
 @dataclass(slots=True)
 class RenderJob:
+    """One fully planned ffmpeg invocation for a single section."""
+
     section: Section
     output_path: Path
     arguments: list[str]
@@ -21,6 +25,7 @@ def plan_render_jobs(
     *,
     muted: bool,
 ) -> list[RenderJob]:
+    """Build the ordered render queue for the current set of sections."""
     jobs: list[RenderJob] = []
     for section in sections:
         output_path = section_output_path(
@@ -53,6 +58,7 @@ def build_ffmpeg_arguments(
     *,
     muted: bool,
 ) -> list[str]:
+    """Build the ffmpeg arguments for trimming and cropping one section."""
     crop_x, crop_y, crop_width, crop_height = pixel_crop(
         section.crop,
         media_info.video_width,
@@ -98,6 +104,7 @@ def pixel_crop(
     video_width: int,
     video_height: int,
 ) -> tuple[int, int, int, int]:
+    """Convert a normalized crop rectangle into ffmpeg-safe pixel bounds."""
     width = max(2, video_width)
     height = max(2, video_height)
 
@@ -131,5 +138,6 @@ def section_output_path(
     output_directory: Path,
     section: Section,
 ) -> Path:
+    """Return the output filename used for a rendered section."""
     suffix = source_path.suffix or media_info.container_extension
     return output_directory / f"{source_path.stem}_section{section.identifier}{suffix}"

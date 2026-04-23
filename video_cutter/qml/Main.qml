@@ -216,6 +216,13 @@ ApplicationWindow {
                                 && y >= activeRect.y && y <= activeRect.y + activeRect.height
                         }
 
+                        function fillsVideoRect(rect) {
+                            return Math.abs(rect.x - videoFrame.videoRect.x) < 1
+                                && Math.abs(rect.y - videoFrame.videoRect.y) < 1
+                                && Math.abs(rect.width - videoFrame.videoRect.width) < 1
+                                && Math.abs(rect.height - videoFrame.videoRect.height) < 1
+                        }
+
                         function applyCrop(rect) {
                             backend.setSelectedCropNormalized(
                                 (rect.x - videoFrame.videoRect.x) / videoFrame.videoRect.width,
@@ -479,7 +486,8 @@ ApplicationWindow {
                                     return
                                 }
 
-                                if (cropOverlay.insideActiveRect(mouse.x, mouse.y)) {
+                                if (cropOverlay.insideActiveRect(mouse.x, mouse.y)
+                                        && !cropOverlay.fillsVideoRect(cropOverlay.activeRect)) {
                                     cropOverlay.beginEdit("move", mouse.x, mouse.y)
                                     return
                                 }

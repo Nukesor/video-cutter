@@ -1,3 +1,5 @@
+"""Application bootstrap for the Qt/QML desktop UI."""
+
 from __future__ import annotations
 
 import locale
@@ -14,6 +16,7 @@ from .mpv_item import MpvVideoItem
 
 
 def main() -> int:
+    """Create the Qt app, expose the backend, and enter the event loop."""
     configure_logging()
     log = get_logger("video_cutter.app")
     preview_enabled = not env_flag("VIDEO_CUTTER_DISABLE_PREVIEW")

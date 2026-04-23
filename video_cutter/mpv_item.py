@@ -1,3 +1,5 @@
+"""Qt Quick item that renders the controller's embedded mpv player."""
+
 from __future__ import annotations
 
 import ctypes
@@ -22,24 +24,31 @@ except Exception:  # pragma: no cover - platform-specific import
 
 
 class MpvVideoItem(QQuickFramebufferObject):
+    """QML-facing video surface for the embedded mpv preview."""
+
     controllerChanged = Signal()
 
     def __init__(self, parent: QQuickFramebufferObject | None = None) -> None:
+        """Initialize the QML item before it is bound to a controller."""
         super().__init__(parent)
         self._controller: QObject | None = None
 
     def createRenderer(self) -> QQuickFramebufferObject.Renderer:
+        """Create the framebuffer renderer used by Qt Quick."""
         return _MpvRenderer(self)
 
     def isOpaque(self) -> bool:
+        """Advertise an opaque surface so Qt can compose it efficiently."""
         return True
 
     @Property(QObject, notify=controllerChanged)
     def controller(self) -> QObject | None:
+        """Return the backend object that owns the embedded mpv player."""
         return self._controller
 
     @controller.setter
     def controller(self, controller: QObject | None) -> None:
+        """Attach the backend and trigger a redraw when it changes."""
         if controller is self._controller:
             return
         self._controller = controller
@@ -48,11 +57,15 @@ class MpvVideoItem(QQuickFramebufferObject):
 
     @Slot()
     def scheduleUpdate(self) -> None:
+        """Queue a redraw from mpv's render update callback."""
         self.update()
 
 
 class _MpvRenderer(QQuickFramebufferObject.Renderer):
+    """OpenGL-backed renderer that bridges Qt Quick and mpv."""
+
     def __init__(self, item: MpvVideoItem) -> None:
+        """Store the item reference and defer mpv setup until rendering starts."""
         super().__init__()
         self._log = get_logger("video_cutter.mpv_item")
         self._item = item
@@ -61,6 +74,7 @@ class _MpvRenderer(QQuickFramebufferObject.Renderer):
         self._proc_address_callback = mpv.MpvGlGetProcAddressFn(self._get_proc_address)
 
     def createFramebufferObject(self, size: Any) -> QOpenGLFramebufferObject:
+        """Create the FBO Qt renders into and lazily initialize mpv."""
         controller = self._item.controller
         if (
             self._render_context is None
@@ -84,9 +98,11 @@ class _MpvRenderer(QQuickFramebufferObject.Renderer):
         return self._framebuffer_object
 
     def synchronize(self, item: QQuickFramebufferObject) -> None:
+        """Refresh the item reference before the next render pass."""
         self._item = item  # type: ignore[assignment]
 
     def render(self) -> None:
+        """Ask mpv to draw the current frame into Qt's active framebuffer."""
         controller = self._item.controller
         if controller is None or not hasattr(controller, "player"):
             return
@@ -115,6 +131,7 @@ class _MpvRenderer(QQuickFramebufferObject.Renderer):
         QQuickOpenGLUtils.resetOpenGLState()
 
     def _get_proc_address(self, _context: object, name: bytes) -> int:
+        """Resolve OpenGL function pointers for mpv's render context."""
         decoded_name = name.decode("utf-8")
         address = None
 
@@ -141,6 +158,7 @@ class _MpvRenderer(QQuickFramebufferObject.Renderer):
             return ctypes.cast(address, ctypes.c_void_p).value or 0
 
     def _request_update(self) -> None:
+        """Bounce mpv update requests onto Qt's GUI thread."""
         QMetaObject.invokeMethod(
             self._item,
             "scheduleUpdate",
@@ -148,6 +166,7 @@ class _MpvRenderer(QQuickFramebufferObject.Renderer):
         )
 
     def __del__(self) -> None:
+        """Release the mpv render context when the renderer is discarded."""
         if self._render_context is not None:
             self._log.info("freeing mpv render context")
             self._render_context.free()
