@@ -49,18 +49,33 @@
 - `VideoEditorController` is the central application object.
 - Owns:
   - current source path
-  - probed media metadata
+  - current probed media metadata
   - playback state
   - pending markers for new-section creation
   - selected section index
-  - render state/status text
+  - render process lifecycle / status text
   - `SectionsModel`
 - Selected section markers are surfaced through the existing marker properties so the timeline can highlight the active section bounds.
 - The controller also tracks optional bounded preview playback so a section can be reviewed in-place without affecting export state.
-- Section data is represented by dataclasses:
+
+### Shared Models
+
+- `video_cutter/models.py`
+- Holds the shared dataclasses and simple helpers used across the app:
   - `CropRect`
   - `Section`
   - `MediaInfo`
+  - time formatting / clamp helpers
+
+### Persistence
+
+- `video_cutter/persistence.py`
+- Owns loading and saving the dialog directory state in `~/.local/state/video_cutter.json`.
+
+### Media Probe
+
+- `video_cutter/media.py`
+- Wraps `ffprobe` parsing into a single `probe_media()` function that returns `MediaInfo`.
 
 ### Playback / Preview
 
@@ -100,10 +115,12 @@
 
 ### Export Pipeline
 
-- Export logic lives in `video_cutter/controller.py`.
-- Media metadata is probed with `ffprobe`.
+- Render planning helpers live in `video_cutter/rendering.py`.
+- Runtime render orchestration still lives in `video_cutter/controller.py` through `QProcess`.
+- Media metadata is probed with `ffprobe` via `video_cutter/media.py`.
 - Rendering is executed through `QProcess` running `ffmpeg`.
 - Rendering runs one ffmpeg job per section and names outputs as `{original_name}_section{sectionid}.{original_extension}`.
+- Loading a new file cancels any active render so queued jobs cannot continue against a replaced source.
 
 ### Logging / Debugging
 
