@@ -209,6 +209,7 @@ class VideoEditorController(QObject):
         self._selected_section_index = -1
         self._next_section_id = 1
         self._eof_reached = False
+        self._preview_section_end: float | None = None
         self._status_text = "Open a video to start cutting sections."
         self._rendering = False
         self._render_output = ""
@@ -441,12 +442,57 @@ class VideoEditorController(QObject):
             return False
 
         self._eof_reached = False
+        self._preview_section_end = None
         self._position = start
         self.positionChanged.emit()
         return True
 
     def _selected_section(self) -> Section | None:
         return self._sections_model.section_at(self._selected_section_index)
+
+    def _seek_to_position(
+        self,
+        seconds: float,
+        *,
+        clear_preview: bool,
+        pause_on_reload: bool,
+    ) -> bool:
+        if not self.hasSource:
+            return False
+
+        target = _clamp(seconds, 0.0, self.duration)
+        self._eof_reached = False
+        if clear_preview:
+            self._preview_section_end = None
+
+        try:
+            self._player.seek(target, reference="absolute", precision="exact")
+        except SystemError:
+            self._log.exception("seek failed at %.3f, reloading current source", target)
+            if not self._load_player_source(start=target, pause=pause_on_reload):
+                return False
+
+        self._position = target
+        self.positionChanged.emit()
+        return True
+
+    def _stop_section_preview(self) -> None:
+        if self._preview_section_end is None:
+            return
+
+        preview_end = self._preview_section_end
+        self._preview_section_end = None
+
+        try:
+            self._player.pause = True
+        except SystemError:
+            self._log.exception("failed to pause at preview boundary")
+
+        self._seek_to_position(
+            preview_end,
+            clear_preview=False,
+            pause_on_reload=True,
+        )
 
     def _handle_mpv_log(
         self,
@@ -463,6 +509,7 @@ class VideoEditorController(QObject):
         self._selected_section_index = -1
         self._next_section_id = 1
         self._eof_reached = False
+        self._preview_section_end = None
         self._position = 0.0
         self.markersChanged.emit()
         self.positionChanged.emit()
@@ -472,6 +519,15 @@ class VideoEditorController(QObject):
 
     @Slot(float)
     def _apply_position_update(self, position: float) -> None:
+        if (
+            self._preview_section_end is not None
+            and position >= self._preview_section_end - 0.01
+        ):
+            self._position = position
+            self.positionChanged.emit()
+            self._stop_section_preview()
+            return
+
         if math.isclose(position, self._position, abs_tol=0.01):
             return
         self._position = position
@@ -507,6 +563,8 @@ class VideoEditorController(QObject):
         if reached == self._eof_reached:
             return
         self._eof_reached = reached
+        if reached:
+            self._preview_section_end = None
         if reached:
             self._apply_playing_update(False)
 
@@ -806,20 +864,31 @@ class VideoEditorController(QObject):
 
     @Slot(float)
     def seekTo(self, seconds: float) -> None:
+        self._seek_to_position(
+            seconds,
+            clear_preview=True,
+            pause_on_reload=not self._playing,
+        )
+
+    @Slot()
+    def stepFrameForward(self) -> None:
         if not self.hasSource:
             return
-        target = _clamp(seconds, 0.0, self.duration)
-        self._eof_reached = False
-
+        self._preview_section_end = None
         try:
-            self._player.seek(target, reference="absolute", precision="exact")
+            self._player.command("frame-step")
         except SystemError:
-            self._log.exception("seek failed at %.3f, reloading current source", target)
-            if not self._load_player_source(start=target, pause=not self._playing):
-                return
+            self._log.exception("frame-step failed")
 
-        self._position = target
-        self.positionChanged.emit()
+    @Slot()
+    def stepFrameBackward(self) -> None:
+        if not self.hasSource:
+            return
+        self._preview_section_end = None
+        try:
+            self._player.command("frame-back-step")
+        except SystemError:
+            self._log.exception("frame-back-step failed")
 
     @Slot()
     def markStart(self) -> None:
@@ -889,6 +958,39 @@ class VideoEditorController(QObject):
         self._emit_selection_change()
 
     @Slot(int)
+    def playSection(self, index: int) -> None:
+        section = self._sections_model.section_at(index)
+        if section is None:
+            return
+
+        if index != self._selected_section_index:
+            self._selected_section_index = index
+            self._emit_selection_change()
+
+        self._preview_section_end = section.end
+        if not self._seek_to_position(
+            section.start,
+            clear_preview=False,
+            pause_on_reload=False,
+        ):
+            self._preview_section_end = None
+            return
+
+        try:
+            self._player.pause = False
+        except SystemError:
+            self._log.exception("failed to start section preview")
+            self._preview_section_end = None
+            self._load_player_source(start=section.start, pause=False)
+            return
+
+        self._set_status_text(
+            "Previewing section "
+            f"{section.identifier} "
+            f"({_format_seconds(section.start)} - {_format_seconds(section.end)})"
+        )
+
+    @Slot(int)
     def removeSection(self, index: int) -> None:
         if self._sections_model.section_at(index) is None:
             return
@@ -910,6 +1012,56 @@ class VideoEditorController(QObject):
         )
         self._selected_section_index = -1
         self._emit_selection_change()
+
+    @Slot()
+    def updateSelectedSectionStart(self) -> None:
+        section = self._selected_section()
+        if section is None:
+            return
+        new_start = self._position
+        if new_start >= section.end:
+            self._set_status_text("Start time must be before end time.")
+            return
+        self._sections_model.update_section(
+            self._selected_section_index,
+            Section(
+                identifier=section.identifier,
+                start=new_start,
+                end=section.end,
+                crop=section.crop,
+            ),
+        )
+        self.markersChanged.emit()
+        self._log.info(
+            "updated section %s start to %.3f",
+            section.identifier,
+            new_start,
+        )
+
+    @Slot()
+    def updateSelectedSectionEnd(self) -> None:
+        section = self._selected_section()
+        if section is None:
+            return
+        new_end = self._position
+        if new_end <= section.start:
+            self._set_status_text("End time must be after start time.")
+            return
+        self._sections_model.update_section(
+            self._selected_section_index,
+            Section(
+                identifier=section.identifier,
+                start=section.start,
+                end=new_end,
+                crop=section.crop,
+            ),
+        )
+        self.markersChanged.emit()
+        self._log.info(
+            "updated section %s end to %.3f",
+            section.identifier,
+            new_end,
+        )
 
     @Slot()
     def resetSelectedCrop(self) -> None:

@@ -20,10 +20,12 @@
 - Preview area shows a crop overlay only while a section is selected for editing.
 - Timeline supports seeking and setting start/end markers for creating a new section.
 - Selecting a section temporarily switches the UI into crop-edit mode for that section.
+- Selecting a section also lets the user update that section's start and end markers from the main timeline controls.
 - Crop editing supports drawing a new rectangle, dragging the current crop, and resizing from corner handles.
 - Confirming the crop clears the current section selection so another section can be created.
 - Right sidebar lists all currently defined sections.
 - Selecting a section shows and edits that section's crop rectangle.
+- Each section item includes a preview play action that plays only that section range and stops automatically at the section end.
 - Export writes one rendered output file per section into a user-selected output directory.
 
 ## Current Architecture
@@ -54,6 +56,7 @@
   - render state/status text
   - `SectionsModel`
 - Selected section markers are surfaced through the existing marker properties so the timeline can highlight the active section bounds.
+- The controller also tracks optional bounded preview playback so a section can be reviewed in-place without affecting export state.
 - Section data is represented by dataclasses:
   - `CropRect`
   - `Section`
@@ -91,6 +94,7 @@
   - timeline/marker UI
   - section list
   - export controls/status
+- Global keyboard shortcuts for play/pause and frame stepping are handled at the application level so they still work while controls like the timeline slider have focus.
 - Preview is created through a `Loader` so it can be disabled entirely for debugging.
 - The sidebar includes crop reset and crop confirm actions for the currently selected section.
 

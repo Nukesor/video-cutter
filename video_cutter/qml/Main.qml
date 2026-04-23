@@ -13,6 +13,24 @@ ApplicationWindow {
     color: "#15161a"
     title: backend.sourceName.length > 0 ? backend.sourceName + " - Video Cutter" : "Video Cutter"
 
+    Shortcut {
+        sequence: "Space"
+        context: Qt.ApplicationShortcut
+        onActivated: backend.togglePlayback()
+    }
+
+    Shortcut {
+        sequence: "."
+        context: Qt.ApplicationShortcut
+        onActivated: backend.stepFrameForward()
+    }
+
+    Shortcut {
+        sequence: ","
+        context: Qt.ApplicationShortcut
+        onActivated: backend.stepFrameBackward()
+    }
+
     function formatSection(value) {
         if (value < 0) {
             return "--:--"
@@ -580,16 +598,14 @@ ApplicationWindow {
 
                             Button {
                                 text: "Set Start"
-                                visible: !backend.hasSelectedSection
-                                enabled: backend.hasSource && !backend.hasSelectedSection
-                                onClicked: backend.markStart()
+                                enabled: backend.hasSource
+                                onClicked: backend.hasSelectedSection ? backend.updateSelectedSectionStart() : backend.markStart()
                             }
 
                             Button {
                                 text: "Set End"
-                                visible: !backend.hasSelectedSection
-                                enabled: backend.hasSource && !backend.hasSelectedSection
-                                onClicked: backend.markEnd()
+                                enabled: backend.hasSource
+                                onClicked: backend.hasSelectedSection ? backend.updateSelectedSectionEnd() : backend.markEnd()
                             }
 
                             Button {
@@ -698,13 +714,18 @@ ApplicationWindow {
                                     Layout.fillWidth: true
 
                                     Label {
-                                        text: "Section " + (index + 1)
+                                        text: "Section " + identifier
                                         color: "#eef4ff"
                                         font.bold: true
                                     }
 
                                     Item {
                                         Layout.fillWidth: true
+                                    }
+
+                                    Button {
+                                        text: "Play"
+                                        onClicked: backend.playSection(index)
                                     }
 
                                     Button {
